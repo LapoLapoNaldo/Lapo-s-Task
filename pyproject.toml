@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lapos-task"
+version = "0.2.0"
+description = "Gravador de macros para Linux/Wayland/Hyprland"
+readme = "readME.md"
+license = "MIT"
+requires-python = ">=3.8"
+dependencies = ["evdev>=1.6.0", "PySide6>=6.6.0"]
+
+[project.scripts]
+lapos-task = "src.cli:main"
