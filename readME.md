@@ -13,6 +13,8 @@ automaticamente — sem configuração, igual ao TinyTask.
 - Gravar / reproduzir teclado **e** mouse (movimento, cliques, roda)
 - **Começa do ponto certo**: a posição absoluta do cursor é capturada na gravação
   (via `hyprctl`) e o playback teleporta o cursor pra lá antes de reproduzir
+- **Warp verificado**: após teleportar o cursor, confere a posição e retenta se
+  necessário — precisão de ~1px
 - **Loop**: repetir N vezes ou **infinito** ("∞ sem parar")
 - **Velocidade** de reprodução ajustável (inline na janela)
 - **Hotkeys globais** (padrão: F9 gravar, F10 play, Esc parar) — funcionam com a janela
@@ -24,8 +26,8 @@ automaticamente — sem configuração, igual ao TinyTask.
 ## Instalação
 
 ```bash
-git clone https://github.com/SEU_USER/lapos-task.git
-cd lapos-task
+git clone https://github.com/LapoLapoNaldo/Lapo-s-Task.git
+cd Lapo-s-Task
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
