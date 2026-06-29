@@ -65,6 +65,14 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 As macros ficam em `~/.local/share/lapos-task/macros` e o config em
 `~/.config/lapos-task/config.json`.
 
+## ⚠️ Privacidade
+
+Por natureza, um gravador de macros captura **tudo** que você digita e clica
+enquanto está gravando — incluindo senhas e dados sensíveis — e salva os eventos
+em arquivos `.json` em **texto puro**. Grave apenas o necessário, evite digitar
+segredos durante a gravação e trate os arquivos de macro como dados sensíveis.
+Durante a gravação, o título da janela mostra `● REC` como indicador.
+
 ## Licença
 
 MIT

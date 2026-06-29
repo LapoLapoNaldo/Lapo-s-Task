@@ -44,7 +44,7 @@ def _merge(base, override):
 
 
 def load():
-    """Carrega o config mesclado com os defaults (defaults sãos sempre)."""
+    """Carrega o config mesclado com os defaults (defaults sempre presentes)."""
     cfg = dict(DEFAULTS)
     cfg["hotkeys"] = dict(DEFAULTS["hotkeys"])
     try:
@@ -52,8 +52,34 @@ def load():
             cfg = _merge(cfg, json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
-    os.makedirs(cfg["macros_dir"], exist_ok=True)
+    # macros_dir vindo do config pode ser inválido/sem permissão: faz fallback
+    # para o default em vez de derrubar o app no startup.
+    try:
+        os.makedirs(cfg["macros_dir"], exist_ok=True)
+    except OSError:
+        cfg["macros_dir"] = DEFAULTS["macros_dir"]
+        try:
+            os.makedirs(cfg["macros_dir"], exist_ok=True)
+        except OSError:
+            pass
     return cfg
+
+
+def hotkey_codes(cfg):
+    """Conjunto de keycodes evdev (int) das hotkeys configuradas.
+
+    Usado para ignorar as próprias teclas de atalho durante a gravação, evitando
+    que o clique em "parar" entre na macro. Centraliza a lógica antes duplicada
+    no CLI e na UI.
+    """
+    from evdev import ecodes
+
+    hk = cfg.get("hotkeys", {})
+    return {
+        code
+        for name in hk.values()
+        if (code := getattr(ecodes, name, None)) is not None
+    }
 
 
 def save(cfg):

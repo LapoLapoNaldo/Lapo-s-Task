@@ -25,13 +25,7 @@ def cmd_gui(args, cfg):
 def cmd_record(args, cfg):
     rec = Recorder()
     print("Gravando... Ctrl+C para parar.")
-    from evdev import ecodes
-    hk = cfg.get("hotkeys", {})
-    ignore_keys = {
-        getattr(ecodes, name, None)
-        for name in hk.values()
-        if getattr(ecodes, name, None) is not None
-    }
+    ignore_keys = cfg_mod.hotkey_codes(cfg)
     rec.start(ignore_keys=ignore_keys)
     try:
         while rec.running:
@@ -44,12 +38,9 @@ def cmd_record(args, cfg):
     if not rec.events:
         print("Nenhum evento gravado.")
         return
-    name = args.output or f"macro_{int(time.time())}"
-    if name.endswith(".json"):
-        name = name[:-5]
+    name = storage.safe_name(args.output or f"macro_{int(time.time())}")
     path = os.path.join(cfg["macros_dir"], f"{name}.json")
-    storage.save(rec.events, path, name, start_pos=rec.start_pos,
-                 position_log=getattr(rec, "position_log", None))
+    storage.save(rec.events, path, name, start_pos=rec.start_pos)
     pos = f", início @ {rec.start_pos}" if rec.start_pos else ""
     print(f"Salvo: {path} ({len(rec.events)} eventos{pos})")
 
@@ -62,15 +53,12 @@ def cmd_play(args, cfg):
         sys.exit(1)
     events = data["events"]
     start_pos = data.get("start_pos")
-    position_checkpoints = data.get("position_checkpoints", [])
     speed = args.speed if args.speed is not None else cfg["speed"]
     loop = args.loop if args.loop is not None else cfg["loop_count"]
-    n_chk = len(position_checkpoints)
-    print(f"Reproduzindo {len(events)} eventos (speed={speed}, loop={loop or '∞'}{', ' + str(n_chk) + ' checkpoints' if n_chk else ''})...")
+    print(f"Reproduzindo {len(events)} eventos (speed={speed}, loop={loop or '∞'})...")
     player = Player()
     done = {"ok": False}
     player.play(events, speed=speed, loop=loop, start_pos=start_pos,
-                position_checkpoints=position_checkpoints,
                 on_done=lambda: done.update(ok=True))
     try:
         while not done["ok"]:
@@ -140,7 +128,14 @@ def main():
         "macros": cmd_macros, "export": cmd_export, "import": cmd_import,
     }
     handler = handlers.get(args.cmd, cmd_gui)
-    handler(args, cfg)
+    try:
+        handler(args, cfg)
+    except storage.MacroError as e:
+        print(f"Erro: {e}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"Erro de E/S: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

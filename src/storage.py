@@ -1,18 +1,20 @@
 """Persistência de macros em JSON.
 
-Formato v1 (com metadados)::
+Formato v2 (com metadados)::
 
     {
-      "version": 1,
+      "version": 2,
       "name": "macro_123",
       "created": 1782090011.0,
       "duration": 4.32,
       "event_count": 320,
+      "start_pos": [x, y] | null,
       "events": [{"t": .., "type": .., "code": .., "value": ..}, ...]
     }
 
 O formato v0 antigo era uma lista crua de eventos (``[{...}, ...]``); ele
-continua sendo carregável — :func:`load` detecta e migra em memória.
+continua sendo carregável — :func:`load` detecta e migra em memória. Chaves
+extras de versões antigas (ex.: ``position_checkpoints``) são ignoradas.
 """
 
 import json
@@ -41,6 +43,31 @@ def to_signed32(value):
     return value
 
 
+def safe_name(name):
+    """Reduz ``name`` a um nome de arquivo seguro (sem travessia de diretório).
+
+    Defesa contra ``../`` e separadores vindos de entrada não confiável (nome de
+    macro digitado, ou campo ``name`` de um .json importado).
+    """
+    name = os.path.basename(str(name)).strip()
+    if name.endswith(".json"):
+        name = name[:-5]
+    return name or f"macro_{int(time.time())}"
+
+
+def _stem(path):
+    """Nome do arquivo sem diretório nem extensão."""
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _write_json(data, path):
+    """Escreve ``data`` como JSON indentado em ``path`` (cria o diretório)."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    return path
+
+
 def _sanitize(events):
     """Normaliza os ``value`` dos eventos para int32 com sinal (in place)."""
     for e in events:
@@ -61,7 +88,7 @@ def _duration(events):
     return round(events[-1]["t"], 6) if events else 0.0
 
 
-def build_macro(events, name, start_pos=None, position_log=None):
+def build_macro(events, name, start_pos=None):
     """Monta o dict v2 a partir dos eventos."""
     return {
         "version": FORMAT_VERSION,
@@ -70,24 +97,20 @@ def build_macro(events, name, start_pos=None, position_log=None):
         "duration": _duration(events),
         "event_count": len(events),
         "start_pos": list(start_pos) if start_pos else None,
-        "position_checkpoints": position_log or [],
         "events": events,
     }
 
 
-def save(events, path, name=None, start_pos=None, position_log=None):
+def save(events, path, name=None, start_pos=None):
     """Salva ``events`` em ``path`` no formato v2. Retorna o path."""
     _validate_events(events)
     if name is None:
-        name = os.path.splitext(os.path.basename(path))[0]
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(build_macro(events, name, start_pos, position_log), f, indent=2)
-    return path
+        name = _stem(path)
+    return _write_json(build_macro(events, name, start_pos), path)
 
 
 def load(path):
-    """Carrega uma macro de ``path`` e devolve o dict v1 (migrando v0)."""
+    """Carrega uma macro de ``path`` e devolve o dict v2 (migrando v0)."""
     try:
         with open(path) as f:
             data = json.load(f)
@@ -96,25 +119,18 @@ def load(path):
 
     if isinstance(data, list):  # v0: lista crua de eventos
         events = _sanitize(_validate_events(data))
-        name = os.path.splitext(os.path.basename(path))[0]
-        return build_macro(events, name)
+        return build_macro(events, _stem(path))
 
     if isinstance(data, dict) and "events" in data:
         _sanitize(_validate_events(data["events"]))
         data.setdefault("version", FORMAT_VERSION)
-        data.setdefault("name", os.path.splitext(os.path.basename(path))[0])
+        data.setdefault("name", _stem(path))
         data.setdefault("event_count", len(data["events"]))
         data.setdefault("duration", _duration(data["events"]))
         data.setdefault("start_pos", None)
-        data.setdefault("position_checkpoints", [])
         return data
 
     raise MacroError(f"Formato de macro desconhecido em '{path}'.")
-
-
-def load_events(path):
-    """Atalho: carrega só a lista de eventos."""
-    return load(path)["events"]
 
 
 def list_macros(directory):
@@ -149,23 +165,18 @@ def export(src_path, dst_path):
         dst_path = os.path.join(dst_path, os.path.basename(src_path))
     if not dst_path.endswith(".json"):
         dst_path += ".json"
-    os.makedirs(os.path.dirname(os.path.abspath(dst_path)) or ".", exist_ok=True)
-    with open(dst_path, "w") as f:
-        json.dump(data, f, indent=2)
-    return dst_path
+    return _write_json(data, dst_path)
 
 
 def import_macro(src_path, dest_dir):
-    """Importa ``src_path`` para ``dest_dir`` (valida e normaliza p/ v1)."""
+    """Importa ``src_path`` para ``dest_dir`` (valida e normaliza p/ v2)."""
     data = load(src_path)
     os.makedirs(dest_dir, exist_ok=True)
-    name = data.get("name") or os.path.splitext(os.path.basename(src_path))[0]
+    name = safe_name(data.get("name") or _stem(src_path))
     dst_path = os.path.join(dest_dir, f"{name}.json")
     # evita sobrescrever uma macro existente de mesmo nome
     base, n = dst_path[:-5], 1
     while os.path.exists(dst_path):
         dst_path = f"{base}_{n}.json"
         n += 1
-    with open(dst_path, "w") as f:
-        json.dump(data, f, indent=2)
-    return dst_path
+    return _write_json(data, dst_path)

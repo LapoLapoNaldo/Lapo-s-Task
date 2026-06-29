@@ -19,7 +19,6 @@ import config as cfg_mod
 import storage
 from engine import Recorder, Player
 from hotkeys import HotkeyListener
-from evdev import ecodes
 
 # Paleta Catppuccin Mocha
 BASE = "#1e1e2e"
@@ -96,11 +95,15 @@ class MacroRecorderUI(QWidget):
         self.player = Player()
         self.events = []
         self.start_pos = None
-        self.position_checkpoints = []
         self.current_path = None
         self._rec_start = 0.0
+        # âncora p/ interpolar o progresso do playback entre callbacks de evento
+        # (mantém timer/barra andando nos trechos parados, sem eventos)
+        self._play_anchor = None  # (elapsed, duration, cur_loop, total, t_wall)
+        self._play_speed = 1.0
         self._in_dialog = False  # bloqueia hotkeys enquanto diálogo modal estiver aberto
-        self._rec_stopped = False  # evita dupla chamada do record_done
+        self._recording_session = False  # sessão de gravação ativa (evita dupla finalização)
+        self._closing = False  # suprime finalização de gravação ao fechar a janela
 
         self.bridge = Bridge()
         self.bridge.record_done.connect(self._on_record_done)
@@ -266,19 +269,15 @@ class MacroRecorderUI(QWidget):
             data = storage.load(path)
             self.events = data["events"]
             self.start_pos = data.get("start_pos")
-            self.position_checkpoints = data.get("position_checkpoints", [])
             self.current_path = path
             self.play_btn.setEnabled(bool(self.events) and not self._busy())
             pos = f"  @ {tuple(self.start_pos)}" if self.start_pos else ""
-            n_chk = len(self.position_checkpoints)
-            chk = f" +{n_chk} checkpoints" if n_chk else ""
             self.status_lbl.setText(
-                f"{os.path.basename(path)} — {len(self.events)} eventos{pos}{chk}"
+                f"{os.path.basename(path)} — {len(self.events)} eventos{pos}"
             )
         except storage.MacroError as e:
             self.events = []
             self.start_pos = None
-            self.position_checkpoints = []
             self.current_path = None
             self.play_btn.setEnabled(False)
             self._on_error(str(e))
@@ -298,41 +297,30 @@ class MacroRecorderUI(QWidget):
         if self._busy():
             return
         self.events = []
-        self._rec_stopped = False
+        self._recording_session = True
         self._set_busy_ui(recording=True)
+        self.setWindowTitle("● REC — Lapo's Task")
         self.status_lbl.setText("Gravando... (STOP para parar)")
         self._rec_start = time.monotonic()
         self._timer.start()
-        hk = self.cfg.get("hotkeys", {})
-        ignore_keys = {
-            getattr(ecodes, name, None)
-            for name in hk.values()
-            if getattr(ecodes, name, None) is not None
-        }
         self.recorder.start(
             on_error=lambda e: self.bridge.error.emit(str(e)),
-            ignore_keys=ignore_keys,
+            on_stop=lambda: self.bridge.record_done.emit(),
+            ignore_keys=cfg_mod.hotkey_codes(self.cfg),
         )
-        self._watch_recorder()
-
-    def _watch_recorder(self):
-        if self._rec_stopped:
-            return
-        if self.recorder.running:
-            QTimer.singleShot(100, self._watch_recorder)
-        elif not self.player.running:
-            self._rec_stopped = True
-            self.bridge.record_done.emit()
 
     def _on_record_done(self):
+        # on_stop dispara em qualquer encerramento (stop, fim, fechar janela);
+        # só processamos a sessão de gravação corrente uma única vez.
+        if not self._recording_session or self._closing:
+            return
+        self._recording_session = False
         self._timer.stop()
+        self.setWindowTitle("Lapo's Task")
         self.events = list(self.recorder.events)
         self.start_pos = self.recorder.start_pos
-        self.position_checkpoints = list(getattr(self.recorder, "position_log", []))
         self._set_busy_ui()
-        n_chk = len(self.position_checkpoints)
-        chk = f" +{n_chk} checkpoints" if n_chk else ""
-        self.status_lbl.setText(f"{len(self.events)} eventos gravados{chk}")
+        self.status_lbl.setText(f"{len(self.events)} eventos gravados")
         if self.events:
             self._save_dialog()
 
@@ -353,15 +341,14 @@ class MacroRecorderUI(QWidget):
         if not ok or not name.strip():
             self.status_lbl.setText("Gravação descartada (não salva)")
             return
-        path = os.path.join(self.cfg["macros_dir"], f"{name.strip()}.json")
+        name = storage.safe_name(name)
+        path = os.path.join(self.cfg["macros_dir"], f"{name}.json")
         try:
-            storage.save(self.events, path, name.strip(),
-                         start_pos=self.start_pos,
-                         position_log=self.position_checkpoints)
+            storage.save(self.events, path, name, start_pos=self.start_pos)
             self.current_path = path
             self._refresh_macros()
             self._select_macro_by_path(path)
-            self.status_lbl.setText(f"Salvo: {name.strip()}.json")
+            self.status_lbl.setText(f"Salvo: {name}.json")
         except (storage.MacroError, OSError) as e:
             self._on_error(str(e))
 
@@ -384,29 +371,50 @@ class MacroRecorderUI(QWidget):
         self.progress_bar.setVisible(True)
         self.loop_lbl.setVisible(True)
         self.loop_lbl.setText("Iniciando...")
+        # âncora inicial + timer de UI p/ progresso suave (independe de eventos)
+        self._play_speed = self.cfg["speed"] if self.cfg["speed"] > 0 else 1.0
+        duration = self.events[-1]["t"] if self.events else 0.0
+        self._play_anchor = (0.0, duration, 1, loop, time.monotonic())
+        self._timer.start()
         self.player.play(
             self.events,
             speed=self.cfg["speed"],
             loop=loop,
             start_pos=self.start_pos,
-            position_checkpoints=self.position_checkpoints,
             on_done=lambda: self.bridge.play_done.emit(),
             on_error=lambda e: self.bridge.error.emit(str(e)),
             on_progress=lambda *a: self.bridge.play_progress.emit(*a),
         )
 
     def _on_play_progress(self, elapsed, duration, cur_loop, total_loops):
+        # cada callback de evento re-ancora a interpolação no tempo real
+        self._play_anchor = (elapsed, duration, cur_loop, total_loops, time.monotonic())
+        self._render_play_progress()
+
+    def _render_play_progress(self):
+        """Desenha o progresso interpolando pelo relógio desde a última âncora.
+
+        Assim o timer e a barra continuam andando mesmo em trechos sem eventos
+        (mouse parado), em vez de congelar e pular quando o próximo evento chega.
+        """
+        if self._play_anchor is None:
+            return
+        elapsed, duration, cur_loop, total_loops, t0 = self._play_anchor
         if duration > 0:
+            # macro-time avança a `speed` × tempo de relógio; satura na duração
+            elapsed = min(elapsed + (time.monotonic() - t0) * self._play_speed, duration)
             pct = min(elapsed / duration, 1.0)
             self.progress_bar.setValue(int(pct * 1000))
-            self.timer_lbl.setText(f"{fmt_time(elapsed)} / {fmt_time(duration)}")
             self.progress_bar.setFormat(f"{pct * 100:.0f}%")
+            self.timer_lbl.setText(f"{fmt_time(elapsed)} / {fmt_time(duration)}")
         if total_loops <= 0:
             self.loop_lbl.setText(f"▶ Loop {cur_loop}  (∞)")
         else:
             self.loop_lbl.setText(f"▶ Loop {cur_loop} / {total_loops}")
 
     def _on_play_done(self):
+        self._timer.stop()
+        self._play_anchor = None
         self._set_busy_ui()
         self.progress_bar.setValue(1000)
         self.progress_bar.setFormat("100%")
@@ -416,15 +424,16 @@ class MacroRecorderUI(QWidget):
 
     # --------------------------------------------------------------- stop
     def stop_all(self):
-        was_recording = self.recorder.running
+        # recorder/player emitem seus próprios callbacks (record_done/play_done)
+        # ao encerrar; aqui só sinalizamos a parada.
         self.recorder.stop()
         self.player.stop()
-        if was_recording:
-            self._rec_stopped = True
-            self.bridge.record_done.emit()
 
     def _tick(self):
-        self.timer_lbl.setText(fmt_time(time.monotonic() - self._rec_start))
+        if self.recorder.running:
+            self.timer_lbl.setText(fmt_time(time.monotonic() - self._rec_start))
+        elif self._play_anchor is not None:
+            self._render_play_progress()
 
     def _hide_progress(self):
         if not self.player.running:
@@ -550,6 +559,7 @@ class MacroRecorderUI(QWidget):
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
+        self._closing = True
         self.recorder.stop()
         self.player.stop()
         self.hotkeys.stop()
@@ -614,6 +624,16 @@ class ConfigDialog(QDialog):
         d = QFileDialog.getExistingDirectory(self, "Pasta de macros", self.dir_edit.text())
         if d:
             self.dir_edit.setText(d)
+
+    def accept(self):
+        chosen = [combo.currentText() for combo in self.hk.values()]
+        if len(set(chosen)) != len(chosen):
+            QMessageBox.warning(
+                self, "Hotkeys repetidas",
+                "Cada ação (gravar / play / stop) precisa de uma tecla diferente.",
+            )
+            return
+        super().accept()
 
     def result_config(self):
         self._cfg["macros_dir"] = self.dir_edit.text() or self._cfg["macros_dir"]

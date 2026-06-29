@@ -14,6 +14,7 @@ ausência dele era o motivo de o playback antigo "não fazer nada").
 """
 
 import errno
+import functools
 import select
 import shutil
 import subprocess
@@ -28,6 +29,19 @@ from storage import to_signed32
 # mouse, roda, e o sync que delimita cada lote.
 _RECORDED_TYPES = (ecodes.EV_KEY, ecodes.EV_REL, ecodes.EV_SYN)
 
+# Nome do nosso dispositivo virtual (UInput). Ignorado na captura p/ não criar
+# feedback loop reinjetando os próprios eventos.
+_VIRTUAL_NAME = "LaposTask"
+
+# Capabilities consideradas "input de verdade" por padrão.
+_DEFAULT_CAPS = (ecodes.EV_KEY, ecodes.EV_REL, ecodes.EV_ABS)
+
+
+@functools.lru_cache(maxsize=1)
+def _hyprctl():
+    """Caminho do ``hyprctl`` (ou None), resolvido uma única vez por sessão."""
+    return shutil.which("hyprctl")
+
 
 def get_cursor_pos():
     """Posição absoluta (x, y) do cursor via hyprctl, ou None se indisponível.
@@ -36,7 +50,7 @@ def get_cursor_pos():
     sabe de onde partiu. Capturamos a posição absoluta no início para o playback
     poder começar do mesmo ponto X.
     """
-    if not shutil.which("hyprctl"):
+    if not _hyprctl():
         return None
     try:
         out = subprocess.run(
@@ -50,7 +64,7 @@ def get_cursor_pos():
 
 def warp_cursor(x, y):
     """Teleporta o cursor para (x, y) absoluto via hyprctl. Retorna sucesso."""
-    if not shutil.which("hyprctl"):
+    if not _hyprctl():
         return False
     try:
         subprocess.run(
@@ -62,24 +76,33 @@ def warp_cursor(x, y):
         return False
 
 
-def list_input_devices():
-    """Retorna os InputDevice acessíveis que são teclado e/ou mouse."""
+def list_input_devices(require=_DEFAULT_CAPS):
+    """InputDevices acessíveis com ao menos uma capability em ``require``.
+
+    Dispositivos que não interessam (e os nossos virtuais) são **fechados** antes
+    do retorno — evitando o vazamento de file descriptors que ocorria quando o
+    chamador filtrava o resultado e descartava os ``InputDevice`` abertos.
+    """
     devices = []
     for path in list_devices():
         try:
             dev = InputDevice(path)
         except (PermissionError, OSError):
             continue
-        # Evita feedback loop ignorando os nossos dispositivos virtuais
-        if dev.name in ("LaposTask", "MacroRecorder"):
+        caps = dev.capabilities()
+        if dev.name == _VIRTUAL_NAME or not any(c in caps for c in require):
             dev.close()
             continue
-        caps = dev.capabilities()
-        if ecodes.EV_KEY in caps or ecodes.EV_REL in caps or ecodes.EV_ABS in caps:
-            devices.append(dev)
-        else:
-            dev.close()
+        devices.append(dev)
     return devices
+
+
+def _close_all(devices):
+    for dev in devices:
+        try:
+            dev.close()
+        except OSError:
+            pass
 
 
 class Recorder:
@@ -90,47 +113,30 @@ class Recorder:
         self._running = False
         self.events = []
         self.start_pos = None  # posição absoluta do cursor no início
-        self.position_log = []  # [[t, x, y], ...] — checkpoints de posição
 
     @property
     def running(self):
         return self._running
 
-    def start(self, callback=None, on_error=None, ignore_keys=None):
-        """Inicia a gravação em background. ``callback(event)`` é chamado para
-        cada evento gravado; ``on_error(exc)`` se algo falhar na thread."""
+    def start(self, callback=None, on_error=None, on_stop=None, ignore_keys=None):
+        """Inicia a gravação em background.
+
+        ``callback(event)`` é chamado para cada evento gravado; ``on_error(exc)``
+        se algo falhar na thread; ``on_stop()`` ao encerrar (em qualquer caso),
+        permitindo à UI reagir sem precisar fazer polling.
+        """
         if self._running:
             return
         self.events = []
-        self.position_log = []
         self.start_pos = get_cursor_pos()
-        if self.start_pos:
-            self.position_log.append([0.0, self.start_pos[0], self.start_pos[1]])
-        self._rec_start = time.monotonic()
         self._running = True
         self._thread = threading.Thread(
-            target=self._run, args=(callback, on_error, ignore_keys), daemon=True
+            target=self._run, args=(callback, on_error, on_stop, ignore_keys),
+            daemon=True,
         )
         self._thread.start()
-        if self.start_pos:
-            # Thread separada p/ amostrar posição absoluta sem atrapalhar gravação
-            t = threading.Thread(target=self._log_positions, daemon=True)
-            t.start()
 
-    def _log_positions(self):
-        """Amostra a posição absoluta do cursor a cada ~2s para checkpoints.
-        Usado apenas como metadado na macro (não aplica em playback).
-        """
-        while self._running:
-            time.sleep(2.0)
-            if not self._running:
-                break
-            pos = get_cursor_pos()
-            if pos and self.events:
-                elapsed = round(time.monotonic() - self._rec_start, 3)
-                self.position_log.append([elapsed, pos[0], pos[1]])
-
-    def _run(self, callback, on_error, ignore_keys=None):
+    def _run(self, callback, on_error, on_stop, ignore_keys=None):
         devices = []
         ignore_keys = ignore_keys or set()
         try:
@@ -178,11 +184,9 @@ class Recorder:
                 on_error(exc)
         finally:
             self._running = False
-            for dev in devices:
-                try:
-                    dev.close()
-                except OSError:
-                    pass
+            _close_all(devices)
+            if on_stop:
+                on_stop()
 
     def stop(self):
         self._running = False
@@ -203,12 +207,9 @@ class Player:
         return self._running
 
     def play(self, events, speed=1.0, loop=1, start_pos=None,
-             on_done=None, on_error=None, on_progress=None,
-             position_checkpoints=None):
+             on_done=None, on_error=None, on_progress=None):
         """Reproduz ``events``. ``loop`` = número de repetições (<=0 = infinito
         até :meth:`stop`). ``start_pos`` = (x, y) absoluto para o cursor iniciar.
-        ``position_checkpoints`` = lista ``[[t, x, y], ...]`` para correção
-        periódica da posição do cursor.
         ``on_progress(elapsed, duration, cur_loop, total_loops)`` é chamado ~30×/s.
         Roda em background."""
         if self._running or not events:
@@ -218,8 +219,7 @@ class Player:
         self._running = True
         self._thread = threading.Thread(
             target=self._run,
-            args=(events, speed, loop, start_pos, on_done, on_error, on_progress,
-                  position_checkpoints or []),
+            args=(events, speed, loop, start_pos, on_done, on_error, on_progress),
             daemon=True,
         )
         self._thread.start()
@@ -238,10 +238,28 @@ class Player:
             cap[ecodes.EV_REL] = sorted(rels)
         if not cap:
             cap = {ecodes.EV_KEY: [ecodes.KEY_A]}
-        return UInput(cap, name="LaposTask")
+        return UInput(cap, name=_VIRTUAL_NAME)
 
-    def _run(self, events, speed, loop, start_pos, on_done, on_error, on_progress,
-             position_checkpoints=None):
+    def _interruptible_sleep(self, delay):
+        """Dorme ``delay`` segundos em fatias, respondendo ao stop sem busy-wait."""
+        end = time.monotonic() + delay
+        while self._running:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.01, remaining))
+
+    def _warp_to_start(self, start_pos):
+        """Posiciona o cursor no ponto inicial, conferindo uma vez."""
+        if not warp_cursor(int(start_pos[0]), int(start_pos[1])):
+            return  # sem hyprctl: nada a fazer, não desperdiça o sleep
+        time.sleep(0.15)
+        actual = get_cursor_pos()
+        if actual and (abs(actual[0] - start_pos[0]) > 2
+                       or abs(actual[1] - start_pos[1]) > 2):
+            warp_cursor(int(start_pos[0]), int(start_pos[1]))
+
+    def _run(self, events, speed, loop, start_pos, on_done, on_error, on_progress):
         ui = None
         pressed = set()
         speed = speed if speed > 0 else 1.0
@@ -254,33 +272,18 @@ class Player:
             iteration = 0
             last_progress = 0.0
             while self._running and (loop <= 0 or iteration < loop):
-                # reporta início do loop
                 if on_progress:
                     on_progress(0.0, duration, iteration + 1, loop)
                 # cada repetição parte do mesmo ponto onde a gravação começou
                 if start_pos:
-                    warp_cursor(int(start_pos[0]), int(start_pos[1]))
-                    time.sleep(0.15)
-                    # Verifica uma vez e tenta de novo se errou (sem loop infinito)
-                    actual = get_cursor_pos()
-                    if actual and (abs(actual[0] - start_pos[0]) > 2
-                                   or abs(actual[1] - start_pos[1]) > 2):
-                        warp_cursor(int(start_pos[0]), int(start_pos[1]))
+                    self._warp_to_start(start_pos)
                 prev = 0.0
                 for e in events:
                     if not self._running:
                         break
                     delay = (e["t"] - prev) / speed
                     if delay > 0:
-                        end = time.monotonic() + delay
-                        remaining = delay
-                        # Dorme em fatias p/ responder ao stop rapidamente
-                        while self._running and remaining > 0.002:
-                            time.sleep(min(0.01, remaining - 0.002))
-                            remaining = end - time.monotonic()
-                        # Busy-wait final para precisão
-                        while self._running and time.monotonic() < end:
-                            pass
+                        self._interruptible_sleep(delay)
                     prev = e["t"]
 
                     # to_signed32: defesa contra macros gravadas pelo bug unsigned
@@ -296,16 +299,6 @@ class Player:
                             else:
                                 pressed.discard(e["code"])
 
-                    # Aplica checkpoints de posição após processar o evento
-                    # (corrige deriva da aceleração do UInput —
-                    #  ATENÇÃO: desabilitado por enquanto pra evitar TPs;
-                    #  os dados continuam sendo gravados na macro)
-                    # if has_hyprctl and checkpoints:
-                    #     while chk_idx < len(checkpoints) and e["t"] >= checkpoints[chk_idx][0]:
-                    #         _, cx, cy = checkpoints[chk_idx]
-                    #         warp_cursor(int(cx), int(cy))
-                    #         chk_idx += 1
-
                     # reporta progresso ~30×/s (a cada ~33ms)
                     if on_progress:
                         now = time.monotonic()
@@ -315,7 +308,6 @@ class Player:
                 # garante um sync ao fim do lote, caso a macro não termine em SYN
                 ui.syn()
                 iteration += 1
-                # reporta fim do loop
                 if on_progress:
                     on_progress(duration, duration, iteration, loop)
                 if self._running and (loop <= 0 or iteration < loop):

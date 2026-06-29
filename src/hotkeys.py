@@ -46,8 +46,7 @@ class HotkeyListener:
     def _run(self):
         devices = []
         try:
-            devices = [d for d in list_input_devices()
-                       if ecodes.EV_KEY in d.capabilities()]
+            devices = list_input_devices(require=(ecodes.EV_KEY,))
             if not devices:
                 return
             fd_map = {d.fd: d for d in devices}
