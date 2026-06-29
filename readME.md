@@ -25,16 +25,40 @@ automaticamente — sem configuração, igual ao TinyTask.
 
 ## Instalação
 
+### Rápida (recomendada)
+
+O `install.sh` instala tudo num ambiente isolado (sem mexer no Python do
+sistema), cria o comando `lapos-task` e um atalho no menu de aplicativos:
+
 ```bash
 git clone https://github.com/LapoLapoNaldo/Lapo-s-Task.git
 cd Lapo-s-Task
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+./install.sh
+```
+
+Ou em uma linha, sem clonar manualmente:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LapoLapoNaldo/Lapo-s-Task/main/install.sh | bash
+```
+
+O instalador coloca o app em `~/.local/share/lapos-task`, o launcher em
+`~/.local/bin/lapos-task` e o atalho em `~/.local/share/applications`. Nenhum
+passo precisa de `sudo` — exceto a configuração de permissões de input (abaixo),
+que o próprio script oferece configurar ao final.
+
+Opções:
+
+```bash
+./install.sh --permissions   # instala e já configura grupo input + regra udev (sudo)
+./install.sh --uninstall     # remove o app (preserva suas macros e configurações)
+./install.sh --help
 ```
 
 ### Permissões (uma vez)
 
-Para ler/injetar input sem `sudo`:
+Para ler/injetar input sem `sudo`. O `install.sh` pode fazer isto por você
+(`--permissions`), ou manualmente:
 
 ```bash
 sudo usermod -aG input $USER
@@ -43,24 +67,40 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 # faça logout/login para o grupo 'input' valer
 ```
 
+### Manual / desenvolvimento
+
+Se preferir rodar direto do repositório:
+
+```bash
+git clone https://github.com/LapoLapoNaldo/Lapo-s-Task.git
+cd Lapo-s-Task
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
 ## Uso
+
+Depois de instalar com o `install.sh`, use o comando `lapos-task`:
 
 ### GUI
 
 ```bash
-.venv/bin/python src/cli.py            # ou: .venv/bin/python src/cli.py gui
+lapos-task            # ou: lapos-task gui
 ```
 
 ### Terminal
 
 ```bash
-.venv/bin/python src/cli.py record -o minha_macro     # gravar (Ctrl+C p/ parar)
-.venv/bin/python src/cli.py play minha_macro          # reproduzir
-.venv/bin/python src/cli.py play minha_macro -s 2 -l 3 # 2× mais rápido, 3 repetições
-.venv/bin/python src/cli.py macros                    # listar macros
-.venv/bin/python src/cli.py export minha_macro ~/bkp/ # exportar
-.venv/bin/python src/cli.py import ~/bkp/outra.json   # importar
+lapos-task record -o minha_macro     # gravar (Ctrl+C p/ parar)
+lapos-task play minha_macro          # reproduzir
+lapos-task play minha_macro -s 2 -l 3 # 2× mais rápido, 3 repetições
+lapos-task macros                    # listar macros
+lapos-task export minha_macro ~/bkp/ # exportar
+lapos-task import ~/bkp/outra.json   # importar
 ```
+
+> Rodando direto do repositório (instalação manual), troque `lapos-task` por
+> `.venv/bin/python src/cli.py` nos comandos acima.
 
 As macros ficam em `~/.local/share/lapos-task/macros` e o config em
 `~/.config/lapos-task/config.json`.

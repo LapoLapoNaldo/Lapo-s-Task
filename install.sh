@@ -93,7 +93,7 @@ else
 fi
 [ -f "$SRC_DIR/requirements.txt" ] || die "requirements.txt não encontrado na fonte."
 
-cleanup() { [ -n "$CLEANUP_SRC" ] && rm -rf "$CLEANUP_SRC"; }
+cleanup() { [ -n "$CLEANUP_SRC" ] && rm -rf "$CLEANUP_SRC"; return 0; }
 trap cleanup EXIT
 
 # ----------------------------------------------------------------- instala app
